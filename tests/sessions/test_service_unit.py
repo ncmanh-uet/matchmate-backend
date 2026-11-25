@@ -18,11 +18,15 @@ def test_missing_session_rolls_back_before_any_mutation():
     class FakeUow:
         @contextmanager
         def write(self):
-            events.append("lock")
+            events.append("begin")
             try:
                 yield self
             finally:
                 events.append("rollback")
+
+        def lock_session(self, session_id):
+            events.append(("lock_session", session_id))
+            return False
 
         def commit(self):
             raise AssertionError("Không commit khi kèo không tồn tại")
@@ -32,7 +36,6 @@ def test_missing_session_rolls_back_before_any_mutation():
         return datetime(2030, 11, 1, tzinfo=timezone.utc)
 
     repository = Mock(spec=ParticipationRepository)
-    repository.get_session.side_effect = lambda _id: events.append("lookup")
     service = ParticipationService(
         repository,
         FakeUow(),
@@ -43,5 +46,6 @@ def test_missing_session_rolls_back_before_any_mutation():
     with pytest.raises(DomainError) as caught:
         service.join(1, 999)
     assert caught.value.code == "SESSION_NOT_FOUND"
-    assert events == ["lock", "clock", "lookup", "rollback"]
+    assert events == ["begin", ("lock_session", 999), "rollback"]
+    repository.get_session.assert_not_called()
     repository.create.assert_not_called()

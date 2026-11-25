@@ -68,6 +68,13 @@ class SqlAlchemyParticipationRepository:
         )
         return self._session_provider().scalar(statement) is not None
 
+    def get_session_and_user_ids(self, participation_id: int) -> tuple[int, int] | None:
+        statement = select(ParticipationModel.session_id, ParticipationModel.user_id).where(
+            ParticipationModel.id == participation_id
+        )
+        row = self._session_provider().execute(statement).one_or_none()
+        return (row.session_id, row.user_id) if row is not None else None
+
     def get_by_id(self, participation_id: int) -> Participation | None:
         model = self._session_provider().get(ParticipationModel, participation_id)
         return to_participation(model) if model is not None else None

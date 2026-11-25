@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Literal
 
-from app.domain.entities import Session
+from app.domain.entities import Participation, Session
 from app.domain.enums import Gender, ParticipationStatus
 from app.domain.errors import DomainError
 from app.domain.ports import Clock, MatchingRequestWriter, UnitOfWork
@@ -38,7 +38,8 @@ class ParticipationService:
 
     def join(self, actor_user_id: int, session_id: int) -> ParticipationDetail:
         with self.uow.write():
-            # BEGIN IMMEDIATE đã thành công. Không dùng thời gian cũ trước khi chờ khóa.
+            self._lock_session(session_id)
+            self._lock_user(actor_user_id)
             now = self.clock.now()
             game = self._session(session_id)
             require_open_session(game, now)
@@ -69,10 +70,8 @@ class ParticipationService:
         if decision not in ("APPROVE", "REJECT"):
             raise DomainError("VALIDATION_ERROR", "Quyết định phải là APPROVE hoặc REJECT")
         with self.uow.write():
+            part = self._lock_participation(participation_id)
             now = self.clock.now()
-            part = self.repository.get_by_id(participation_id)
-            if part is None:
-                raise DomainError("PARTICIPATION_NOT_FOUND", "Không tìm thấy lượt tham gia")
             game = self._session(part.session_id)
             require_decision_allowed(game, part, actor_user_id, now)
 
@@ -99,15 +98,34 @@ class ParticipationService:
 
     def withdraw(self, actor_user_id: int, participation_id: int) -> ParticipationDetail:
         with self.uow.write():
+            part = self._lock_participation(participation_id)
             now = self.clock.now()
-            part = self.repository.get_by_id(participation_id)
-            if part is None:
-                raise DomainError("PARTICIPATION_NOT_FOUND", "Không tìm thấy lượt tham gia")
             game = self._session(part.session_id)
             if should_withdraw(game, part, actor_user_id, now):
                 self.repository.set_status(part.id, ParticipationStatus.CANCELLED, now)
             # Matching đã đóng không mở lại khi người chơi rút lượt.
             return self._finish(part.id, actor_user_id, now)
+
+    def _lock_participation(self, participation_id: int) -> Participation:
+        # Chỉ lấy ID trước khi khóa để đọc trạng thái lượt mới nhất sau khi chờ.
+        ids = self.repository.get_session_and_user_ids(participation_id)
+        if ids is None:
+            raise DomainError("PARTICIPATION_NOT_FOUND", "Không tìm thấy lượt tham gia")
+        session_id, user_id = ids
+        self._lock_session(session_id)
+        self._lock_user(user_id)
+        part = self.repository.get_by_id(participation_id)
+        if part is None:
+            raise DomainError("PARTICIPATION_NOT_FOUND", "Không tìm thấy lượt tham gia")
+        return part
+
+    def _lock_session(self, session_id: int) -> None:
+        if not self.uow.lock_session(session_id):
+            raise DomainError("SESSION_NOT_FOUND", "Không tìm thấy kèo")
+
+    def _lock_user(self, user_id: int) -> None:
+        if not self.uow.lock_user(user_id):
+            raise DomainError("UNAUTHORIZED", "Tài khoản không tồn tại")
 
     def _session(self, session_id: int) -> Session:
         game = self.repository.get_session(session_id)

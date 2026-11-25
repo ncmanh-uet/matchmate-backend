@@ -1,5 +1,6 @@
 from typing import Any
 
+from app.domain.enums import ParticipationStatus
 from app.domain.ports import Clock, MatchingRequestWriter, UnitOfWork
 from app.domain.time_rules import is_valid_time_window
 from app.features.auth.contracts import PlayerProfileReader
@@ -38,6 +39,8 @@ class SessionService:
 
     def create(self, data: CreateSessionInput, host_id: int) -> dict[str, Any]:
         with self.uow.write():
+            if not self.uow.lock_user(host_id):
+                raise SessionError("UNAUTHORIZED", "Tài khoản không tồn tại")
             now = self.clock.now()
 
             try:
@@ -75,9 +78,21 @@ class SessionService:
 
     def cancel(self, session_id: int, actor_id: int) -> dict[str, Any]:
         with self.uow.write():
+            if not self.uow.lock_session(session_id):
+                raise SessionError("SESSION_NOT_FOUND", "Không tìm thấy kèo")
             snapshot = self.details.get_detail_data(session_id)
             if snapshot is None:
                 raise SessionError("SESSION_NOT_FOUND", "Không tìm thấy kèo")
+
+            if snapshot["host_user_id"] == actor_id:
+                active_statuses = (ParticipationStatus.PENDING, ParticipationStatus.ACCEPTED)
+                affected_users = {
+                    part["user_id"]
+                    for part in snapshot["participations"]
+                    if part["status"] in active_statuses
+                }
+                for user_id in sorted(affected_users):
+                    self.uow.lock_user(user_id)
 
             data = snapshot["session"]
             cancelled_at = session_cancellation_time(

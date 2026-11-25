@@ -84,7 +84,7 @@ demo evidence, and the Identity reader/wiring support. PostgreSQL validation con
 
 **Member 1 — Application transactions**
 
-- [ ] Wire locks into join, approve/reject, and withdraw in session-then-user order. For cancellation, take the session lock first, then lock affected users by ascending ID. For creation, lock the host user before checking overlap and inserting the new session.
+- [x] Wire locks into join, approve/reject, and withdraw in session-then-user order. For cancellation, take the session lock first, then lock affected users by ascending ID. For creation, lock the host user before checking overlap and inserting the new session.
 - [ ] Re-read time and relevant database state after locking. Check authorization, status, available places, and schedule overlap before writing. Include matching closure in the create/approve transaction.
 - [ ] Run the first PostgreSQL lifecycle race checks with Member 2's fixtures and review the committed state after both requests finish.
 - [ ] Verify the Sessions detail response on PostgreSQL reads a consistent snapshot when it combines queries. Add route-policy coverage that fails when a new endpoint lacks an access declaration. Verify backend JWT and host/owner checks protect mutations behind ingress.

@@ -1,15 +1,17 @@
 import os
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from threading import Event
 from uuid import uuid4
 
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select, update
 from sqlalchemy.exc import IntegrityError
 
-from app.db.models import Base, MatchingRequestModel, ParticipationModel, VenueModel
+from app.db.models import Base, MatchingRequestModel, ParticipationModel, SessionModel, VenueModel
 from app.db.session import create_db_engine, create_session_factory
 from app.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.domain.errors import DatabaseBusyError, DatabaseTimeoutError
@@ -159,6 +161,54 @@ def test_postgres_snapshot_and_statement_timeout(db_session_factory):
         connection = writer.session.connection()
         connection.exec_driver_sql("SET LOCAL statement_timeout = '100ms'")
         connection.exec_driver_sql("SELECT pg_sleep(1)")
+
+
+def test_approval_reloads_participation_after_session_lock_wait(
+    postgres, client, game_data, auth_headers
+):
+    player = auth_headers(game_data["player"])
+    host = auth_headers(game_data["host"])
+    session_id = game_data["first"]
+    pending = client.post("/participations", headers=player, json={"session_id": session_id})
+    assert pending.status_code == 201, pending.text
+    participation_id = pending.json()["id"]
+    approval_waiting = Event()
+
+    def observe_session_lock(_conn, _cursor, statement, _params, _context, _many):
+        if "FROM sessions" in statement and "FOR UPDATE" in statement:
+            approval_waiting.set()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with postgres.begin() as blocker:
+            blocker.execute(
+                select(SessionModel.id).where(SessionModel.id == session_id).with_for_update()
+            )
+            event.listen(postgres, "before_cursor_execute", observe_session_lock)
+            try:
+                approval = pool.submit(
+                    client.post,
+                    f"/participations/{participation_id}/decision",
+                    headers=host,
+                    json={"decision": "APPROVE"},
+                )
+                assert approval_waiting.wait(timeout=3)
+                blocker.execute(
+                    update(ParticipationModel)
+                    .where(ParticipationModel.id == participation_id)
+                    .values(status="CANCELLED", cancelled_at=datetime.now(timezone.utc))
+                )
+            finally:
+                event.remove(postgres, "before_cursor_execute", observe_session_lock)
+
+        result = approval.result(timeout=5)
+
+    assert result.status_code == 409, result.text
+    assert result.json()["error"]["code"] == "INVALID_STATE"
+    with postgres.connect() as connection:
+        status = connection.scalar(
+            select(ParticipationModel.status).where(ParticipationModel.id == participation_id)
+        )
+    assert status == "CANCELLED"
 
 
 def test_api_lifecycle_and_matching_on_migrated_postgres(postgres, source, client):
