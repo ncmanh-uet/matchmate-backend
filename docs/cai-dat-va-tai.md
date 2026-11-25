@@ -22,6 +22,29 @@ docker compose up -d
 
 Seed tạo bảng và 10 sân mẫu, không reset DB và không cập nhật cấu trúc bảng đã có.
 
+### API và PostgreSQL trong Docker
+
+Chạy `python3 -m scripts.init_env`, rồi thêm các biến sau vào `.env` trên Linux hoặc macOS. Thay `your_local_password` bằng mật khẩu local chỉ gồm ký tự an toàn cho URL. Nếu đã có volume `matchmate-local_member2_postgres_data`, dùng lại mật khẩu đã tạo volume đó.
+
+```dotenv
+COMPOSE_FILE=compose.yaml:compose.postgres.yaml
+COMPOSE_PROJECT_NAME=matchmate-local
+MEMBER2_POSTGRES_DB=matchmate_local
+MEMBER2_POSTGRES_PASSWORD=your_local_password
+MATCHMATE_DOCKER_DATABASE_URL=postgresql+psycopg://matchmate:${MEMBER2_POSTGRES_PASSWORD}@postgres:5432/${MEMBER2_POSTGRES_DB}
+```
+
+Khởi tạo schema và dữ liệu mẫu, rồi khởi động API:
+
+```bash
+docker compose build api
+docker compose run --rm api python -m alembic upgrade head
+docker compose run --rm api python -m scripts.seed
+docker compose up -d --wait
+```
+
+Sau lần đầu, khởi động lại bằng `docker compose up -d --wait`. API dùng `postgres:5432` trong mạng Docker. PostgreSQL có thể truy cập từ máy local qua `127.0.0.1:55432`.
+
 ## Python
 
 Cần Python 3.11 trở lên:

@@ -4,7 +4,7 @@ import time
 import jwt
 import pytest
 
-from app.features.auth.route_access import ROUTE_ACCESS
+from app.features.auth.route_access import ROUTE_ACCESS, RouteAccess
 from app.main import app
 
 NOW = int(time.time())
@@ -35,7 +35,14 @@ def test_every_http_route_declares_an_access_policy():
                 (method, route.path) for method in (getattr(route, "methods", None) or ())
             )
 
-    assert registered == ROUTE_ACCESS.keys()
+    missing = registered - ROUTE_ACCESS.keys()
+    stale = ROUTE_ACCESS.keys() - registered
+    invalid = sorted(
+        route for route, policy in ROUTE_ACCESS.items() if not isinstance(policy, RouteAccess)
+    )
+    assert not missing, f"Routes without an access declaration: {sorted(missing)}"
+    assert not stale, f"Access declarations for unregistered routes: {sorted(stale)}"
+    assert not invalid, f"Routes with invalid access declarations: {invalid}"
 
 
 @pytest.mark.parametrize("host_me", ["true", "1", "YES", "on", "t", "y"])

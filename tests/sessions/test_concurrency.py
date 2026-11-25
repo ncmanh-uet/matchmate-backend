@@ -1,11 +1,11 @@
-"""Các actor dùng connection riêng tới cùng SQLite file; kiểm lại invariant sau commit."""
+"""Các actor dùng connection riêng; kiểm lại invariant sau khi cả hai thao tác kết thúc."""
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from threading import Barrier, Event
 
 import pytest
-from sqlalchemy import event, func, select
+from sqlalchemy import event, select
 
 from app.db.models import ParticipationModel, SessionModel
 from app.db.session import create_db_engine, create_session_factory
@@ -44,6 +44,7 @@ def run_pair(first, second):
         return [future.result(timeout=10) for future in futures]
 
 
+@pytest.mark.parametrize("db_engine", ["sqlite", "postgres"], indirect=True)
 def test_two_approvals_compete_for_last_place(service, make_service, game_data, db_session_factory):
     first = service.join(game_data["player"], game_data["first"])
     second = service.join(game_data["other"], game_data["first"])
@@ -56,17 +57,20 @@ def test_two_approvals_compete_for_last_place(service, make_service, game_data, 
     )
     assert sorted(results) == ["OK", "SESSION_FULL"]
     with db_session_factory() as session:
-        accepted = session.scalar(
-            select(func.count())
-            .select_from(ParticipationModel)
-            .where(
-                ParticipationModel.session_id == game_data["first"],
-                ParticipationModel.status == "ACCEPTED",
+        rows = session.execute(
+            select(ParticipationModel.user_id, ParticipationModel.status).where(
+                ParticipationModel.session_id == game_data["first"]
             )
-        )
-        assert accepted == 2  # host và đúng một người thắng quyền ghi
+        ).all()
+    expected_status = {"OK": "ACCEPTED", "SESSION_FULL": "PENDING"}
+    assert dict(rows) == {
+        game_data["host"]: "ACCEPTED",
+        first.user_id: expected_status[results[0]],
+        second.user_id: expected_status[results[1]],
+    }
 
 
+@pytest.mark.parametrize("db_engine", ["sqlite", "postgres"], indirect=True)
 def test_same_player_cannot_be_approved_into_overlapping_games(
     service,
     make_service,
@@ -94,14 +98,19 @@ def test_same_player_cannot_be_approved_into_overlapping_games(
     )
     assert sorted(results) == ["OK", "TIME_CONFLICT"]
     with db_session_factory() as session:
-        statuses = session.scalars(
-            select(ParticipationModel.status).where(
+        rows = session.execute(
+            select(ParticipationModel.session_id, ParticipationModel.status).where(
                 ParticipationModel.user_id == game_data["player"]
             )
         ).all()
-        assert sorted(statuses) == ["ACCEPTED", "PENDING"]
+    expected_status = {"OK": "ACCEPTED", "TIME_CONFLICT": "PENDING"}
+    assert dict(rows) == {
+        first.session_id: expected_status[results[0]],
+        second.session_id: expected_status[results[1]],
+    }
 
 
+@pytest.mark.parametrize("db_engine", ["sqlite", "postgres"], indirect=True)
 def test_approval_against_withdrawal(service, make_service, game_data, db_session_factory):
     pending = service.join(game_data["player"], game_data["first"])
     approved, withdrawn = run_pair(
@@ -112,14 +121,15 @@ def test_approval_against_withdrawal(service, make_service, game_data, db_sessio
     with db_session_factory() as session:
         assert session.get(ParticipationModel, pending.id).status == "CANCELLED"
         accepted = session.scalars(
-            select(ParticipationModel.id).where(
+            select(ParticipationModel.user_id).where(
                 ParticipationModel.session_id == game_data["first"],
                 ParticipationModel.status == "ACCEPTED",
             )
         ).all()
-        assert len(accepted) == 1
+        assert accepted == [game_data["host"]]
 
 
+@pytest.mark.parametrize("db_engine", ["sqlite", "postgres"], indirect=True)
 def test_approval_against_session_cancellation(
     service,
     make_service,

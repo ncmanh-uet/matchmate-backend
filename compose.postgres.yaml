@@ -1,0 +1,16 @@
+services:
+  api:
+    environment:
+      DATABASE_URL: ${MATCHMATE_DOCKER_DATABASE_URL:?Set MATCHMATE_DOCKER_DATABASE_URL in .env}
+    volumes: !reset []
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    extends:
+      file: compose.phase1-member2.yaml
+      service: postgres
+
+volumes:
+  member2_postgres_data:

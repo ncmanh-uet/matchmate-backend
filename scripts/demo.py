@@ -141,10 +141,28 @@ def run_demo(base_url: str, step: bool, ca_file: str | None = None) -> None:
     check(joined["quoted_fee_vnd"] == 40000, "Phí snapshot không đúng")
     print(f"  Lượt #{part_id}: PENDING, chưa giữ chỗ; phí được lưu là 40.000 VND.")
 
+    show("5a. Kiểm tra JWT và quyền sửa kèo, lượt tham gia")
+    session_path = f"/sessions/{session_id}"
+    participation_path = f"/participations/{part_id}"
+    decision_path = f"{participation_path}/decision"
+    before = api("GET", session_path, token=host)
+    for actor_token in (None, "invalid-jwt"):
+        denied = api("POST", decision_path, {"decision": "APPROVE"}, actor_token, expected=401)
+        check(denied["error"]["code"] == "UNAUTHORIZED", "Sai mã lỗi JWT")
+    for method, path, data, actor_token in (
+        ("POST", decision_path, {"decision": "APPROVE"}, player),
+        ("POST", decision_path, {"decision": "REJECT"}, player),
+        ("DELETE", participation_path, None, host),
+        ("DELETE", session_path, None, player),
+    ):
+        denied = api(method, path, data, actor_token, expected=403)
+        check(denied["error"]["code"] == "FORBIDDEN", "Sai mã lỗi quyền truy cập")
+    check(api("GET", session_path, token=host) == before, "Thao tác bị từ chối đã thay đổi dữ liệu")
+
     show("6. Host duyệt và kiểm tra kèo đã đủ người")
-    approved = api("POST", f"/participations/{part_id}/decision", {"decision": "APPROVE"}, host)
+    approved = api("POST", decision_path, {"decision": "APPROVE"}, host)
     check(approved["status"] == "ACCEPTED", "Duyệt chưa chuyển ACCEPTED")
-    detail = api("GET", f"/sessions/{session_id}", token=host)
+    detail = api("GET", session_path, token=host)
     check(detail["accepted_count"] == 2 and detail["remaining_capacity"] == 0, "Sai sức chứa")
     print("  ACCEPTED; kèo đủ 2/2 người, không còn chỗ.")
 
@@ -154,14 +172,14 @@ def run_demo(base_url: str, step: bool, ca_file: str | None = None) -> None:
     print("  SESSION_FULL: từ chối, không tăng số người.")
 
     show("8. Người chơi rút lượt")
-    withdrawn = api("DELETE", f"/participations/{part_id}", token=player)
+    withdrawn = api("DELETE", participation_path, token=player)
     check(withdrawn["status"] == "CANCELLED", "Rút chưa chuyển CANCELLED")
-    detail = api("GET", f"/sessions/{session_id}", token=host)
+    detail = api("GET", session_path, token=host)
     check(detail["accepted_count"] == 1 and detail["remaining_capacity"] == 1, "Không trả lại chỗ")
     print("  Lượt CANCELLED; kèo còn host, mở lại 1 chỗ.")
 
     show("9. Host hủy kèo")
-    cancelled = api("DELETE", f"/sessions/{session_id}", token=host)
+    cancelled = api("DELETE", session_path, token=host)
     check(
         cancelled["status"] == "CANCELLED" and cancelled["accepted_count"] == 0, "Hủy chưa đầy đủ"
     )

@@ -1,9 +1,7 @@
-import os
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from threading import Event
-from uuid import uuid4
 
 import pytest
 from alembic import command
@@ -12,42 +10,11 @@ from sqlalchemy import event, func, select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.db.models import Base, MatchingRequestModel, ParticipationModel, SessionModel, VenueModel
-from app.db.session import create_db_engine, create_session_factory
+from app.db.session import create_session_factory
 from app.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.domain.errors import DatabaseBusyError, DatabaseTimeoutError
 from scripts.import_sqlite_to_postgres import import_sqlite
 from scripts.prepare_member2_phase1 import prepare
-
-
-@pytest.fixture
-def postgres(monkeypatch):
-    url = os.getenv("MATCHMATE_TEST_POSTGRES_URL")
-    if not url:
-        pytest.skip("Set MATCHMATE_TEST_POSTGRES_URL to a disposable PostgreSQL server")
-    admin = create_db_engine(url)
-    database = f"matchmate_test_{uuid4().hex}"
-    engine = None
-    created = False
-    try:
-        if admin.dialect.name != "postgresql":
-            pytest.fail("MATCHMATE_TEST_POSTGRES_URL must point to PostgreSQL")
-        with admin.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
-            connection.exec_driver_sql(f"CREATE DATABASE {database}")
-            created = True
-        target_url = admin.url.set(database=database).render_as_string(hide_password=False)
-        monkeypatch.setenv("DATABASE_URL", target_url)
-        command.upgrade(Config("alembic.ini"), "head")
-        engine = create_db_engine(target_url)
-        yield engine
-    finally:
-        if engine is not None:
-            engine.dispose()
-        try:
-            if created:
-                with admin.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
-                    connection.exec_driver_sql(f"DROP DATABASE {database}")
-        finally:
-            admin.dispose()
 
 
 @pytest.fixture
@@ -161,6 +128,64 @@ def test_postgres_snapshot_and_statement_timeout(db_session_factory):
         connection = writer.session.connection()
         connection.exec_driver_sql("SET LOCAL statement_timeout = '100ms'")
         connection.exec_driver_sql("SELECT pg_sleep(1)")
+
+
+def test_session_detail_keeps_one_snapshot_during_cancellation(
+    postgres, client, game_data, auth_headers
+):
+    host = auth_headers(game_data["host"])
+    player = auth_headers(game_data["player"])
+    session_id = game_data["first"]
+    url = f"/sessions/{session_id}"
+    pending = client.post("/participations", headers=player, json={"session_id": session_id})
+    assert pending.status_code == 201, pending.text
+    approved = client.post(
+        f"/participations/{pending.json()['id']}/decision",
+        headers=host,
+        json={"decision": "APPROVE"},
+    )
+    assert approved.status_code == 200, approved.text
+    before = client.get(url, headers=host)
+    assert before.status_code == 200, before.text
+    assert before.json()["status"] == "OPEN"
+    assert before.json()["accepted_count"] == 2
+
+    reading_participations = Event()
+    resume_detail = Event()
+
+    def pause_participation_query(_conn, _cursor, statement, _params, _context, _many):
+        if "FROM participations JOIN users" in statement and not reading_participations.is_set():
+            reading_participations.set()
+            assert resume_detail.wait(timeout=10), "Cancellation did not finish"
+
+    event.listen(postgres, "before_cursor_execute", pause_participation_query)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            in_flight = pool.submit(client.get, url, headers=host)
+            try:
+                assert reading_participations.wait(timeout=5), (
+                    "Detail never reached the roster query"
+                )
+                cancelled = client.delete(url, headers=host)
+                assert cancelled.status_code == 200, cancelled.text
+            finally:
+                resume_detail.set()
+            during = in_flight.result(timeout=5)
+    finally:
+        event.remove(postgres, "before_cursor_execute", pause_participation_query)
+
+    assert during.status_code == 200, during.text
+    assert during.json() == before.json()
+    after = client.get(url, headers=host)
+    assert after.status_code == 200, after.text
+    snapshot = after.json()
+    assert snapshot == cancelled.json()
+    assert snapshot["status"] == "CANCELLED"
+    assert snapshot["accepted_count"] == 0
+    assert [part["status"] for part in snapshot["management"]["participations"]] == [
+        "CANCELLED",
+        "CANCELLED",
+    ]
 
 
 def test_approval_reloads_participation_after_session_lock_wait(

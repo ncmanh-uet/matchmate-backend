@@ -1,8 +1,12 @@
+import os
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
+from alembic import command
+from alembic.config import Config
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -47,8 +51,43 @@ def auth_headers():
 
 
 @pytest.fixture
-def db_engine(tmp_path: Path) -> Iterator[Engine]:
-    """Mỗi test dùng một SQLite file riêng, có đủ năm bảng."""
+def postgres(monkeypatch: pytest.MonkeyPatch) -> Iterator[Engine]:
+    url = os.getenv("MATCHMATE_TEST_POSTGRES_URL")
+    if not url:
+        pytest.skip("Set MATCHMATE_TEST_POSTGRES_URL to a disposable PostgreSQL server")
+    admin = create_db_engine(url)
+    database = f"matchmate_test_{uuid4().hex}"
+    engine = None
+    created = False
+    try:
+        if admin.dialect.name != "postgresql":
+            pytest.fail("MATCHMATE_TEST_POSTGRES_URL must point to PostgreSQL")
+        with admin.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+            connection.exec_driver_sql(f"CREATE DATABASE {database}")
+            created = True
+        target_url = admin.url.set(database=database).render_as_string(hide_password=False)
+        monkeypatch.setenv("DATABASE_URL", target_url)
+        command.upgrade(Config("alembic.ini"), "head")
+        engine = create_db_engine(target_url)
+        yield engine
+    finally:
+        if engine is not None:
+            engine.dispose()
+        try:
+            if created:
+                with admin.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+                    connection.exec_driver_sql(f"DROP DATABASE {database}")
+        finally:
+            admin.dispose()
+
+
+@pytest.fixture
+def db_engine(tmp_path: Path, request: pytest.FixtureRequest) -> Iterator[Engine]:
+    """Mặc định dùng một SQLite file riêng. Test có thể chọn PostgreSQL."""
+    if getattr(request, "param", "sqlite") == "postgres":
+        yield request.getfixturevalue("postgres")
+        return
+
     engine = create_db_engine(f"sqlite:///{tmp_path / 'test.db'}")
 
     try:
